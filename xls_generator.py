@@ -7,10 +7,6 @@ from openpyxl.styles import Alignment
 from urllib.parse import urlparse
 from collections import defaultdict
 import json
-import os
-import re
-import importlib.util
-import sys
 
 class TemplateAnalyzer:
     def __init__(self, db):
@@ -112,7 +108,7 @@ class AccessibilityReportGenerator:
 
     def collect_test_documentation(self, results):
         """
-        Extract and collect test documentation from test results
+        Extract and collect test documentation from test results and test run metadata
         
         Args:
             results: List of page result documents from MongoDB
@@ -122,6 +118,35 @@ class AccessibilityReportGenerator:
         """
         total_docs_found = 0
         
+        # First, check if documentation exists in the test_runs collection
+        print("Checking test_runs collection for documentation...")
+        try:
+            # Get all test runs
+            test_runs = list(self.db.test_runs.find({}))
+            for test_run in test_runs:
+                # Check if this test run has documentation
+                if 'documentation' in test_run:
+                    documentation = test_run.get('documentation', {})
+                    if isinstance(documentation, dict):
+                        for test_name, doc_data in documentation.items():
+                            if test_name not in self.test_documentation:
+                                print(f"Found documentation for {test_name} in test_run {test_run.get('_id')}")
+                                self.test_documentation[test_name] = doc_data
+                                total_docs_found += 1
+                
+                # Also check for a nested tests collection within the test run
+                if 'tests' in test_run:
+                    tests = test_run.get('tests', {})
+                    for test_name, test_data in tests.items():
+                        if isinstance(test_data, dict) and 'documentation' in test_data:
+                            if test_name not in self.test_documentation:
+                                print(f"Found documentation for {test_name} in test_run.tests")
+                                self.test_documentation[test_name] = test_data['documentation']
+                                total_docs_found += 1
+        except Exception as e:
+            print(f"Error checking test_runs collection: {str(e)}")
+            
+        # Then continue with checking page results
         for result in results:
             print(f"Processing result for URL: {result.get('url', 'unknown')}")
             
@@ -240,76 +265,8 @@ class AccessibilityReportGenerator:
                             total_docs_found += 1
                             break
         
-        # If we still haven't found all test documentation, try loading directly from source files
-        # This is the fallback method to ensure we have documentation for all tests
-        if len(self.test_documentation) < len(test_output_fields):
-            print("\nAttempting to load documentation directly from source files...")
-            self.load_documentation_from_source_files(test_output_fields.keys())
-            
         print(f"Collected documentation for {len(self.test_documentation)} test types (found {total_docs_found} new)")
         return self.test_documentation
-        
-    def load_documentation_from_source_files(self, test_names):
-        """
-        Attempt to load TEST_DOCUMENTATION directly from source files
-        
-        Args:
-            test_names: List of test names to look for
-        """
-        # Path to the test_with_mongo directory
-        test_dir = "/Users/bob3/Documents/Bob/demos/puppeteer/a11yCamp v2/src/test_with_mongo"
-        
-        # Check if the directory exists
-        if not os.path.isdir(test_dir):
-            print(f"Test directory not found: {test_dir}")
-            return
-            
-        # For each test name, look for corresponding file
-        for test_name in test_names:
-            # Skip if we already have documentation for this test
-            if test_name in self.test_documentation:
-                continue
-                
-            # Convert test name to file name (e.g., "images" -> "test_images.py")
-            file_name = f"test_{test_name}.py"
-            file_path = os.path.join(test_dir, file_name)
-            
-            if os.path.isfile(file_path):
-                print(f"Found source file: {file_path}")
-                try:
-                    # Load the module dynamically
-                    spec = importlib.util.spec_from_file_location(f"test_{test_name}", file_path)
-                    module = importlib.util.module_from_spec(spec)
-                    sys.modules[spec.name] = module
-                    spec.loader.exec_module(module)
-                    
-                    # Check if the module has TEST_DOCUMENTATION
-                    if hasattr(module, 'TEST_DOCUMENTATION'):
-                        print(f"Found TEST_DOCUMENTATION in module {test_name}")
-                        self.test_documentation[test_name] = module.TEST_DOCUMENTATION
-                except Exception as e:
-                    print(f"Error loading documentation from {file_path}: {str(e)}")
-                    
-            # For multi-word test names, also try with underscores
-            elif '_' in test_name:
-                words = test_name.split('_')
-                for w in words:
-                    file_name = f"test_{w}.py"
-                    file_path = os.path.join(test_dir, file_name)
-                    if os.path.isfile(file_path):
-                        print(f"Found partial match source file: {file_path}")
-                        try:
-                            spec = importlib.util.spec_from_file_location(f"test_{w}", file_path)
-                            module = importlib.util.module_from_spec(spec)
-                            sys.modules[spec.name] = module
-                            spec.loader.exec_module(module)
-                            
-                            if hasattr(module, 'TEST_DOCUMENTATION'):
-                                print(f"Found TEST_DOCUMENTATION in module {w} for {test_name}")
-                                self.test_documentation[test_name] = module.TEST_DOCUMENTATION
-                                break
-                        except Exception as e:
-                            print(f"Error loading documentation from {file_path}: {str(e)}")
     
     def format_issue_name(self, test_name, flag_name):
         """Format issue name consistently"""

@@ -129,7 +129,21 @@ class AccessibilityReportGenerator:
                     print(f"  Checking {test_name} test data...")
                     
                     if isinstance(test_data, dict):
-                        # First, check for documentation directly in the test_data if it's nested
+                        # Check for documentation directly in the test result data (new structure)
+                        print(f"  Keys in {test_name} test data: {list(test_data.keys())}")
+                        if 'documentation' in test_data:
+                            print(f"  Found documentation directly in {test_name} -> documentation")
+                            doc_data = test_data['documentation']
+                            print(f"  Documentation content: {doc_data.get('testName', 'N/A')}, tests: {len(doc_data.get('tests', []))}")
+                            if test_name in self.test_documentation:
+                                print(f"  Already have documentation for {test_name}, skipping duplicate")
+                            else:
+                                self.test_documentation[test_name] = test_data['documentation']
+                                total_docs_found += 1
+                                print(f"  Added documentation for {test_name} with {len(test_data['documentation'].get('tests', []))} individual tests")
+                            continue
+                            
+                        # First, check for documentation in nested test_data if it's nested
                         if test_name in test_data and 'documentation' in test_data[test_name]:
                             print(f"  Found nested documentation in {test_name} -> {test_name} -> documentation")
                             if test_name in self.test_documentation:
@@ -138,15 +152,6 @@ class AccessibilityReportGenerator:
                                 self.test_documentation[test_name] = test_data[test_name]['documentation']
                                 total_docs_found += 1
                                 print(f"  Added documentation for {test_name} with {len(test_data[test_name]['documentation'].get('tests', []))} individual tests")
-                        # Otherwise, check for documentation directly in the test_data
-                        elif 'documentation' in test_data:
-                            print(f"  Found documentation in {test_name} -> documentation")
-                            if test_name in self.test_documentation:
-                                print(f"  Already have documentation for {test_name}, skipping duplicate")
-                            else:
-                                self.test_documentation[test_name] = test_data['documentation']
-                                total_docs_found += 1
-                                print(f"  Added documentation for {test_name} with {len(test_data['documentation'].get('tests', []))} individual tests")
                         else:
                             # Extra debugging for example.com tests
                             if result.get('url') == 'https://example.com':
@@ -162,6 +167,27 @@ class AccessibilityReportGenerator:
                                             self.test_documentation[test_name] = test_data[test_name]['documentation']
                                             total_docs_found += 1
                                             print(f"  Added documentation for {test_name} with {len(test_data[test_name]['documentation'].get('tests', []))} individual tests")
+        
+        # If we didn't find documentation the normal way, add a special step to check test_with_mongo style results
+        # which have the actual test output in a specifically named field (e.g., 'images', 'tables', 'headings')
+        if total_docs_found == 0:
+            print("No documentation found via standard methods, trying direct test structure checks...")
+            for result in results:
+                if 'results' in result and 'accessibility' in result['results']:
+                    tests = result['results']['accessibility'].get('tests', {})
+                    
+                    for test_name, test_data in tests.items():
+                        # Only process the test if we don't already have documentation for it
+                        if test_name in self.test_documentation:
+                            continue
+                            
+                        # Check if this test has direct test output (like 'images', 'tables', etc.)
+                        if test_name in test_data:
+                            test_output = test_data[test_name]
+                            if isinstance(test_output, dict) and 'documentation' in test_output:
+                                print(f"Found documentation in {test_name} -> {test_name} -> documentation")
+                                self.test_documentation[test_name] = test_output['documentation']
+                                total_docs_found += 1
         
         print(f"Collected documentation for {len(self.test_documentation)} test types (found {total_docs_found} new)")
         return self.test_documentation

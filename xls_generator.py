@@ -88,6 +88,11 @@ class AccessibilityDB:
         """Get all test run IDs"""
         test_runs = self.test_runs.find({}, {'_id': 1})
         return [str(run['_id']) for run in test_runs]
+        
+    def get_test_run_by_name(self, name):
+        """Get a test run by name"""
+        test_run = self.test_runs.find_one({"name": name})
+        return test_run
 
     def __del__(self):
         if hasattr(self, 'client'):
@@ -99,7 +104,68 @@ class AccessibilityReportGenerator:
         self.env = Environment(loader=FileSystemLoader('templates'))
         self.structures = structures or {}
         self.examples = examples or {}
+        self.test_documentation = {}  # Store test documentation from all tests
 
+    def collect_test_documentation(self, results):
+        """
+        Extract and collect test documentation from test results
+        
+        Args:
+            results: List of page result documents from MongoDB
+            
+        Returns:
+            Dictionary with test documentation organized by test type
+        """
+        total_docs_found = 0
+        
+        for result in results:
+            print(f"Processing result for URL: {result.get('url', 'unknown')}")
+            
+            if 'results' in result and 'accessibility' in result['results']:
+                tests = result['results']['accessibility'].get('tests', {})
+                print(f"Found {len(tests)} test types in this result")
+                
+                for test_name, test_data in tests.items():
+                    print(f"  Checking {test_name} test data...")
+                    
+                    if isinstance(test_data, dict):
+                        # First, check for documentation directly in the test_data if it's nested
+                        if test_name in test_data and 'documentation' in test_data[test_name]:
+                            print(f"  Found nested documentation in {test_name} -> {test_name} -> documentation")
+                            if test_name in self.test_documentation:
+                                print(f"  Already have documentation for {test_name}, skipping duplicate")
+                            else:
+                                self.test_documentation[test_name] = test_data[test_name]['documentation']
+                                total_docs_found += 1
+                                print(f"  Added documentation for {test_name} with {len(test_data[test_name]['documentation'].get('tests', []))} individual tests")
+                        # Otherwise, check for documentation directly in the test_data
+                        elif 'documentation' in test_data:
+                            print(f"  Found documentation in {test_name} -> documentation")
+                            if test_name in self.test_documentation:
+                                print(f"  Already have documentation for {test_name}, skipping duplicate")
+                            else:
+                                self.test_documentation[test_name] = test_data['documentation']
+                                total_docs_found += 1
+                                print(f"  Added documentation for {test_name} with {len(test_data['documentation'].get('tests', []))} individual tests")
+                        else:
+                            # Extra debugging for example.com tests
+                            if result.get('url') == 'https://example.com':
+                                print(f"  No documentation found in {test_name} test data. Keys at this level: {list(test_data.keys())}")
+                                # If there's a nested structure with the same name, inspect it
+                                if test_name in test_data:
+                                    print(f"  Found nested {test_name} object. Keys: {list(test_data[test_name].keys())}")
+                                    if 'documentation' in test_data[test_name]:
+                                        print(f"  Found documentation in nested structure!")
+                                        if test_name in self.test_documentation:
+                                            print(f"  Already have documentation for {test_name}, skipping duplicate")
+                                        else:
+                                            self.test_documentation[test_name] = test_data[test_name]['documentation']
+                                            total_docs_found += 1
+                                            print(f"  Added documentation for {test_name} with {len(test_data[test_name]['documentation'].get('tests', []))} individual tests")
+        
+        print(f"Collected documentation for {len(self.test_documentation)} test types (found {total_docs_found} new)")
+        return self.test_documentation
+    
     def format_issue_name(self, test_name, flag_name):
         """Format issue name consistently"""
         # Remove 'has' prefix
@@ -122,6 +188,17 @@ class AccessibilityReportGenerator:
             word.capitalize() 
             for word in test_name.split('_')
         )
+        
+        # Check if we have more specific documentation for this issue
+        if test_name in self.test_documentation:
+            docs = self.test_documentation[test_name]
+            # Try to find a specific test that matches this flag
+            for test in docs.get('tests', []):
+                results_fields = test.get('resultsFields', {})
+                for field in results_fields:
+                    if field.endswith(flag_name) or field.endswith(f".{flag_name}"):
+                        # Use the documented test name instead
+                        return f"{test.get('name', formatted_test_name)}: {issue_type}"
         
         return f"{formatted_test_name}: {issue_type}"
 
@@ -266,6 +343,10 @@ class AccessibilityReportGenerator:
                 query['test_run_id'] = test_run_ids
         
         results = list(self.db.page_results.find(query))
+        
+        # Collect test documentation from results
+        self.collect_test_documentation(results)
+        
         summary = self.calculate_summary(test_run_ids)
         
         with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
@@ -399,6 +480,41 @@ class AccessibilityReportGenerator:
                 site_issues_df = pd.DataFrame(site_issues_data)
                 site_issues_df.to_excel(writer, sheet_name='Issues by Site', index=False)
             
+            # Documentation sheet
+            if self.test_documentation:
+                docs_data = []
+                for test_name, doc in self.test_documentation.items():
+                    # Add test general documentation
+                    docs_data.append({
+                        'Test Name': doc.get('testName', test_name),
+                        'Type': 'Test',
+                        'Description': doc.get('description', ''),
+                        'Version': doc.get('version', ''),
+                        'Date': doc.get('date', ''),
+                        'WCAG Criteria': '',
+                        'Impact': '',
+                        'How to Fix': ''
+                    })
+                    
+                    # Add individual checks documentation
+                    for test in doc.get('tests', []):
+                        docs_data.append({
+                            'Test Name': f"{doc.get('testName', test_name)} - {test.get('name', '')}",
+                            'Type': 'Check',
+                            'Description': test.get('description', ''),
+                            'Version': doc.get('version', ''),
+                            'Date': doc.get('date', ''),
+                            'WCAG Criteria': ', '.join(test.get('wcagCriteria', [])),
+                            'Impact': test.get('impact', ''),
+                            'How to Fix': test.get('howToFix', '')
+                        })
+                
+                if docs_data:
+                    docs_df = pd.DataFrame(docs_data)
+                    # Sort alphabetically by Test Name
+                    docs_df = docs_df.sort_values(by=['Test Name'])
+                    docs_df.to_excel(writer, sheet_name='Test Documentation', index=False)
+            
             # Detailed results
             detailed_df = self.format_detailed_results(results)
             detailed_df.to_excel(writer, sheet_name='Detailed Results')
@@ -481,8 +597,59 @@ def main():
         print("\nGenerating accessibility report...")
         generator = AccessibilityReportGenerator(db, structures, examples)
         
-        # Get all test run IDs instead of just the most recent one
+        # Get regular test run IDs
         test_run_ids = db.get_all_test_run_ids()
+        
+        # Also add documentation test run if it exists
+        doc_test_run = db.get_test_run_by_name("Documentation Test Run")
+        if doc_test_run:
+            doc_test_run_id = str(doc_test_run['_id'])
+            print(f"Including Documentation Test Run: {doc_test_run_id}")
+            # Add documentation test run ID if not already in list
+            if doc_test_run_id not in test_run_ids:
+                test_run_ids.append(doc_test_run_id)
+                
+            # Directly get the example.com test result and process its documentation
+            example_result = db.db.page_results.find_one({"url": "https://example.com"})
+            if example_result:
+                print("Found example.com test result - processing documentation directly")
+                # Process the documentation in advance
+                accessibility_tests = example_result.get('results', {}).get('accessibility', {}).get('tests', {})
+                if 'page_structure' in accessibility_tests and 'page_structure' in accessibility_tests['page_structure']:
+                    doc = accessibility_tests['page_structure']['page_structure'].get('documentation')
+                    if doc:
+                        print(f"Pre-loading Page Structure documentation with {len(doc.get('tests', []))} individual tests")
+                        generator.test_documentation['page_structure'] = doc
+                
+                if 'accessible_names' in accessibility_tests and 'accessible_names' in accessibility_tests['accessible_names']:
+                    doc = accessibility_tests['accessible_names']['accessible_names'].get('documentation')
+                    if doc:
+                        print(f"Pre-loading Accessible Names documentation with {len(doc.get('tests', []))} individual tests")
+                        generator.test_documentation['accessible_names'] = doc
+                
+                if 'focus_management' in accessibility_tests:
+                    # Debug output to inspect the focus_management data structure
+                    print("  Found focus_management in tests, examining structure...")
+                    fm_data = accessibility_tests['focus_management']
+                    
+                    # Option 1: Nested structure with focus_management.focus_management.documentation
+                    if isinstance(fm_data, dict) and 'focus_management' in fm_data and isinstance(fm_data['focus_management'], dict):
+                        print("  Checking for nested focus_management > focus_management > documentation structure")
+                        if 'documentation' in fm_data['focus_management']:
+                            doc = fm_data['focus_management']['documentation']
+                            print(f"  Found nested documentation with {len(doc.get('tests', []))} individual tests")
+                            generator.test_documentation['focus_management'] = doc
+                    
+                    # Option 2: Direct documentation in focus_management
+                    elif isinstance(fm_data, dict) and 'documentation' in fm_data:
+                        print("  Checking for direct focus_management > documentation structure")
+                        doc = fm_data['documentation']
+                        print(f"  Found direct documentation with {len(doc.get('tests', []))} individual tests")
+                        generator.test_documentation['focus_management'] = doc
+                    
+                    # Option 3: Focus management as direct document  
+                    elif isinstance(fm_data, dict):
+                        print("  Dumping focus_management keys for diagnosis: " + str(list(fm_data.keys())))
         
         if test_run_ids:
             print(f"Generating report for {len(test_run_ids)} test runs")

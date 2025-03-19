@@ -7,6 +7,10 @@ from openpyxl.styles import Alignment
 from urllib.parse import urlparse
 from collections import defaultdict
 import json
+import os
+import re
+import importlib.util
+import sys
 
 class TemplateAnalyzer:
     def __init__(self, db):
@@ -168,29 +172,144 @@ class AccessibilityReportGenerator:
                                             total_docs_found += 1
                                             print(f"  Added documentation for {test_name} with {len(test_data[test_name]['documentation'].get('tests', []))} individual tests")
         
-        # If we didn't find documentation the normal way, add a special step to check test_with_mongo style results
-        # which have the actual test output in a specifically named field (e.g., 'images', 'tables', 'headings')
-        if total_docs_found == 0:
-            print("No documentation found via standard methods, trying direct test structure checks...")
-            for result in results:
-                if 'results' in result and 'accessibility' in result['results']:
-                    tests = result['results']['accessibility'].get('tests', {})
-                    
-                    for test_name, test_data in tests.items():
-                        # Only process the test if we don't already have documentation for it
-                        if test_name in self.test_documentation:
-                            continue
-                            
-                        # Check if this test has direct test output (like 'images', 'tables', etc.)
-                        if test_name in test_data:
-                            test_output = test_data[test_name]
-                            if isinstance(test_output, dict) and 'documentation' in test_output:
-                                print(f"Found documentation in {test_name} -> {test_name} -> documentation")
-                                self.test_documentation[test_name] = test_output['documentation']
-                                total_docs_found += 1
+        # Add a separate step to directly check for documentation in specific locations
+        # This addresses the different ways tests might structure their output
+        print("\nAttempting comprehensive documentation scan with multiple strategies...")
         
+        # Map of possible test output field names based on test names
+        test_output_fields = {
+            'images': 'images',
+            'tables': 'tables', 
+            'headings': 'headings',
+            'focus_management': 'focus_management',
+            'page_structure': 'page_structure',
+            'accessible_names': 'accessible_names',
+            'landmarks': 'landmarks',
+            'forms': 'forms',
+            'colors': 'colors',
+            'html_structure': 'html_structure',
+            'animations': 'animations',
+            'videos': 'videos'
+            # Add more mappings as needed
+        }
+        
+        print("Scanning database for test documentation using multiple approaches...")
+        for result in results:
+            if 'results' in result and 'accessibility' in result['results']:
+                tests = result['results']['accessibility'].get('tests', {})
+                
+                for test_name, test_data in tests.items():
+                    # Skip if we already found documentation for this test
+                    if test_name in self.test_documentation:
+                        continue
+                    
+                    # 1. Check if the test itself contains documentation field
+                    if isinstance(test_data, dict) and 'documentation' in test_data:
+                        print(f"Found direct documentation in test data for {test_name}")
+                        self.test_documentation[test_name] = test_data['documentation']
+                        total_docs_found += 1
+                        continue
+                    
+                    # 2. Check if test has a corresponding field with documentation
+                    output_field = test_output_fields.get(test_name, test_name)
+                    if isinstance(test_data, dict) and output_field in test_data:
+                        output_data = test_data[output_field]
+                        if isinstance(output_data, dict) and 'documentation' in output_data:
+                            print(f"Found documentation in {test_name} -> {output_field} field")
+                            self.test_documentation[test_name] = output_data['documentation']
+                            total_docs_found += 1
+                            continue
+                    
+                    # 3. For specific multi-word test names, try direct matching of test field
+                    if '_' in test_name:
+                        # Try with underscores
+                        if test_name in test_data:
+                            field_data = test_data[test_name]
+                            if isinstance(field_data, dict) and 'documentation' in field_data:
+                                print(f"Found documentation using underscore name match: {test_name}")
+                                self.test_documentation[test_name] = field_data['documentation']
+                                total_docs_found += 1
+                                continue
+                    
+                    # 4. Look inside the main result for top-level fields that might contain documentation
+                    # This checks for potential custom field names not in our mapping
+                    for field_name, field_data in test_data.items():
+                        if isinstance(field_data, dict) and 'documentation' in field_data:
+                            print(f"Found documentation in {test_name} -> {field_name} field")
+                            self.test_documentation[test_name] = field_data['documentation']
+                            total_docs_found += 1
+                            break
+        
+        # If we still haven't found all test documentation, try loading directly from source files
+        # This is the fallback method to ensure we have documentation for all tests
+        if len(self.test_documentation) < len(test_output_fields):
+            print("\nAttempting to load documentation directly from source files...")
+            self.load_documentation_from_source_files(test_output_fields.keys())
+            
         print(f"Collected documentation for {len(self.test_documentation)} test types (found {total_docs_found} new)")
         return self.test_documentation
+        
+    def load_documentation_from_source_files(self, test_names):
+        """
+        Attempt to load TEST_DOCUMENTATION directly from source files
+        
+        Args:
+            test_names: List of test names to look for
+        """
+        # Path to the test_with_mongo directory
+        test_dir = "/Users/bob3/Documents/Bob/demos/puppeteer/a11yCamp v2/src/test_with_mongo"
+        
+        # Check if the directory exists
+        if not os.path.isdir(test_dir):
+            print(f"Test directory not found: {test_dir}")
+            return
+            
+        # For each test name, look for corresponding file
+        for test_name in test_names:
+            # Skip if we already have documentation for this test
+            if test_name in self.test_documentation:
+                continue
+                
+            # Convert test name to file name (e.g., "images" -> "test_images.py")
+            file_name = f"test_{test_name}.py"
+            file_path = os.path.join(test_dir, file_name)
+            
+            if os.path.isfile(file_path):
+                print(f"Found source file: {file_path}")
+                try:
+                    # Load the module dynamically
+                    spec = importlib.util.spec_from_file_location(f"test_{test_name}", file_path)
+                    module = importlib.util.module_from_spec(spec)
+                    sys.modules[spec.name] = module
+                    spec.loader.exec_module(module)
+                    
+                    # Check if the module has TEST_DOCUMENTATION
+                    if hasattr(module, 'TEST_DOCUMENTATION'):
+                        print(f"Found TEST_DOCUMENTATION in module {test_name}")
+                        self.test_documentation[test_name] = module.TEST_DOCUMENTATION
+                except Exception as e:
+                    print(f"Error loading documentation from {file_path}: {str(e)}")
+                    
+            # For multi-word test names, also try with underscores
+            elif '_' in test_name:
+                words = test_name.split('_')
+                for w in words:
+                    file_name = f"test_{w}.py"
+                    file_path = os.path.join(test_dir, file_name)
+                    if os.path.isfile(file_path):
+                        print(f"Found partial match source file: {file_path}")
+                        try:
+                            spec = importlib.util.spec_from_file_location(f"test_{w}", file_path)
+                            module = importlib.util.module_from_spec(spec)
+                            sys.modules[spec.name] = module
+                            spec.loader.exec_module(module)
+                            
+                            if hasattr(module, 'TEST_DOCUMENTATION'):
+                                print(f"Found TEST_DOCUMENTATION in module {w} for {test_name}")
+                                self.test_documentation[test_name] = module.TEST_DOCUMENTATION
+                                break
+                        except Exception as e:
+                            print(f"Error loading documentation from {file_path}: {str(e)}")
     
     def format_issue_name(self, test_name, flag_name):
         """Format issue name consistently"""

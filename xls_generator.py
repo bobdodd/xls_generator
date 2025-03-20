@@ -269,9 +269,9 @@ class AccessibilityReportGenerator:
         return self.test_documentation
     
     def format_issue_name(self, test_name, flag_name):
-        """Format issue name consistently"""
+        """Format issue name consistently with documentation if available"""
         # Remove 'has' prefix
-        flag_text = flag_name[3:]
+        flag_text = flag_name[3:] if flag_name.startswith('has') else flag_name
         
         # Split camel case into words
         words = []
@@ -291,17 +291,43 @@ class AccessibilityReportGenerator:
             for word in test_name.split('_')
         )
         
-        # Check if we have more specific documentation for this issue
-        if test_name in self.test_documentation:
-            docs = self.test_documentation[test_name]
-            # Try to find a specific test that matches this flag
-            for test in docs.get('tests', []):
-                results_fields = test.get('resultsFields', {})
-                for field in results_fields:
-                    if field.endswith(flag_name) or field.endswith(f".{flag_name}"):
-                        # Use the documented test name instead
-                        return f"{test.get('name', formatted_test_name)}: {issue_type}"
+        # Try multiple variants of the test name to match documentation
+        test_name_variants = [
+            test_name,                     # Original name
+            test_name.replace('-', '_'),   # Replace hyphens with underscores
+            test_name.replace('_', '-'),   # Replace underscores with hyphens
+            test_name.lower(),             # Lowercase
+            test_name.replace('-', '').replace('_', '')  # No separators
+        ]
         
+        # Check if we have documentation for any variant of this test name
+        for variant in test_name_variants:
+            if variant in self.test_documentation:
+                docs = self.test_documentation[variant]
+                doc_test_name = docs.get('testName', formatted_test_name)
+                
+                # Try to find a specific test that matches this flag
+                for test in docs.get('tests', []):
+                    results_fields = test.get('resultsFields', {})
+                    
+                    # Look for various ways the flag could be referenced
+                    flag_variants = [
+                        f"pageFlags.{flag_name}",
+                        f"pageFlags.has{flag_text}",
+                        f"details.{flag_name}",
+                        flag_name
+                    ]
+                    
+                    # Look for any matching result field
+                    for field in results_fields:
+                        if any(field.endswith(fv) or field == fv for fv in flag_variants):
+                            # Use the documented test name instead
+                            return f"{doc_test_name} - {test.get('name', issue_type)}"
+                            
+                # If no specific test found, use the general test name from documentation
+                return f"{doc_test_name}: {issue_type}"
+        
+        # Fallback to formatted name if no documentation found
         return f"{formatted_test_name}: {issue_type}"
 
     def format_json_as_table(self, data, indent=0):
@@ -446,8 +472,33 @@ class AccessibilityReportGenerator:
         
         results = list(self.db.page_results.find(query))
         
-        # Collect test documentation from results
+        # First, explicitly fetch test documentation from test_runs collection
+        # This ensures we get documentation for all tests, even those not in the current results
+        print("\nExplicitly fetching documentation from test_runs collection...")
+        try:
+            # Get all test runs to look for documentation
+            all_test_runs = list(self.db.test_runs.find({}))
+            for run in all_test_runs:
+                if 'documentation' in run:
+                    print(f"Found documentation in test run: {run.get('_id')}")
+                    for test_name, doc in run['documentation'].items():
+                        test_key = test_name.replace('-', '_').lower()
+                        if test_key not in self.test_documentation:
+                            print(f"  Adding documentation for {test_name}")
+                            self.test_documentation[test_key] = doc
+                        else:
+                            print(f"  Already have documentation for {test_name}")
+        except Exception as e:
+            print(f"Error fetching documentation from test_runs: {e}")
+        
+        # Then, collect test documentation from results
         self.collect_test_documentation(results)
+        
+        # For debugging: print all test documentation found
+        print("\nDocumentation found for the following tests:")
+        for test_name in sorted(self.test_documentation.keys()):
+            tests_count = len(self.test_documentation[test_name].get('tests', []))
+            print(f"  - {test_name} ({tests_count} subtests)")
         
         summary = self.calculate_summary(test_run_ids)
         
@@ -584,11 +635,17 @@ class AccessibilityReportGenerator:
             
             # Documentation sheet
             if self.test_documentation:
+                print("\nPreparing documentation sheet...")
                 docs_data = []
                 for test_name, doc in self.test_documentation.items():
+                    # Get a clean test name for display
+                    display_test_name = doc.get('testName', test_name.replace('_', ' ').title())
+                    
+                    print(f"Adding documentation for {display_test_name}")
+                    
                     # Add test general documentation
                     docs_data.append({
-                        'Test Name': doc.get('testName', test_name),
+                        'Test Name': display_test_name,
                         'Type': 'Test',
                         'Description': doc.get('description', ''),
                         'Version': doc.get('version', ''),
@@ -600,22 +657,44 @@ class AccessibilityReportGenerator:
                     
                     # Add individual checks documentation
                     for test in doc.get('tests', []):
-                        docs_data.append({
-                            'Test Name': f"{doc.get('testName', test_name)} - {test.get('name', '')}",
-                            'Type': 'Check',
-                            'Description': test.get('description', ''),
-                            'Version': doc.get('version', ''),
-                            'Date': doc.get('date', ''),
-                            'WCAG Criteria': ', '.join(test.get('wcagCriteria', [])),
-                            'Impact': test.get('impact', ''),
-                            'How to Fix': test.get('howToFix', '')
-                        })
+                        subtest_name = test.get('name', '')
+                        if subtest_name:  # Only add subtests that have names
+                            full_name = f"{display_test_name} - {subtest_name}"
+                            print(f"  Adding subtest: {subtest_name}")
+                            
+                            docs_data.append({
+                                'Test Name': full_name,
+                                'Type': 'Check',
+                                'Description': test.get('description', ''),
+                                'Version': doc.get('version', ''),
+                                'Date': doc.get('date', ''),
+                                'WCAG Criteria': ', '.join(test.get('wcagCriteria', [])),
+                                'Impact': test.get('impact', ''),
+                                'How to Fix': test.get('howToFix', '')
+                            })
                 
                 if docs_data:
+                    # Sort by Test Name and make Type a secondary sort key (Test first, then Check)
+                    # This ensures each test is followed by its checks
+                    print(f"Creating documentation sheet with {len(docs_data)} entries")
                     docs_df = pd.DataFrame(docs_data)
-                    # Sort alphabetically by Test Name
-                    docs_df = docs_df.sort_values(by=['Test Name'])
+                    
+                    # Create a custom sorter for Type column
+                    type_order = {'Test': 0, 'Check': 1}
+                    docs_df['type_order'] = docs_df['Type'].map(type_order)
+                    
+                    # Sort first by Test Name, then by type_order
+                    docs_df = docs_df.sort_values(['Test Name', 'type_order'])
+                    
+                    # Remove the temporary sorting column
+                    docs_df = docs_df.drop(columns=['type_order'])
+                    
+                    # Write to Excel
                     docs_df.to_excel(writer, sheet_name='Test Documentation', index=False)
+                    
+                    print("Documentation sheet created successfully")
+                else:
+                    print("No documentation data found to include in report")
             
             # Detailed results
             detailed_df = self.format_detailed_results(results)

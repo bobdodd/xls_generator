@@ -56,13 +56,24 @@ class TemplateAnalyzer:
             for path in sorted(self.structures[test_name]):
                 print(f"  {path}")
 
+DEFAULT_DB_NAME = 'accessibility_tests'
+
 class AccessibilityDB:
-    def __init__(self):
+    def __init__(self, db_name=None):
         try:
             self.client = MongoClient('mongodb://localhost:27017/')
-            self.db = self.client['accessibility_tests']
+            
+            # Use the specified database name or default
+            if db_name is None:
+                db_name = DEFAULT_DB_NAME
+                print(f"Warning: No database name specified for XLS generator. Using default database '{DEFAULT_DB_NAME}'.")
+            
+            self.db_name = db_name
+            self.db = self.client[db_name]
             self.test_runs = self.db['test_runs']
             self.page_results = self.db['page_results']
+            
+            print(f"XLS Generator connected to database: '{db_name}'")
         except Exception as e:
             print(f"Failed to connect to MongoDB: {e}")
             raise
@@ -456,11 +467,20 @@ class AccessibilityReportGenerator:
         
         return df
 
-    def generate_excel_report(self, test_run_ids=None, output_file='accessibility_report.xlsx'):
+    def generate_excel_report(self, test_run_ids=None, output_file='accessibility_report.xlsx', db_name=None):
         """Generate Excel report with multiple sheets using all test runs"""
         # If no test_run_ids provided, get all of them
         if test_run_ids is None:
             test_run_ids = self.db.get_all_test_run_ids()
+            
+        # Prepend database name to output file if provided
+        if db_name:
+            # Extract the file extension and base name
+            if '.' in output_file:
+                base, ext = output_file.rsplit('.', 1)
+                output_file = f"{db_name}_{base}.{ext}"
+            else:
+                output_file = f"{db_name}_{output_file}"
         
         # Build a query that includes all the specified test runs
         query = {}
@@ -826,10 +846,10 @@ class AccessibilityReportGenerator:
                     adjusted_width = min(max_length + 2, 50)  # Cap at 50 characters
                     worksheet.column_dimensions[column[0].column_letter].width = adjusted_width
 
-def main():
+def main(db_name=None):
     try:
         # Initialize database connection
-        db = AccessibilityDB()
+        db = AccessibilityDB(db_name=db_name)
         
         # Analyze database structure
         print("Analyzing database structure...")
@@ -897,8 +917,17 @@ def main():
         
         if test_run_ids:
             print(f"Generating report for {len(test_run_ids)} test runs")
-            generator.generate_excel_report(test_run_ids, 'accessibility_report.xlsx')
-            print("Report generated successfully: accessibility_report.xlsx")
+            output_file = 'accessibility_report.xlsx'
+            generator.generate_excel_report(test_run_ids, output_file, db_name=db.db_name)
+            
+            # Determine the actual filename after possible db_name prepending
+            if db.db_name != DEFAULT_DB_NAME:
+                base, ext = output_file.rsplit('.', 1)
+                actual_file = f"{db.db_name}_{base}.{ext}"
+            else:
+                actual_file = output_file
+                
+            print(f"Report generated successfully: {actual_file}")
         else:
             print("No test runs found in the database")
 
@@ -908,4 +937,9 @@ def main():
         traceback.print_exc()
 
 if __name__ == '__main__':
-    main()
+    import argparse
+    parser = argparse.ArgumentParser(description='Generate Excel report from MongoDB accessibility test results')
+    parser.add_argument('--database', '-db', help='MongoDB database name to use (default: accessibility_tests)')
+    args = parser.parse_args()
+    
+    main(db_name=args.database)

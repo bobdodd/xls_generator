@@ -253,11 +253,18 @@ FORMS_DOCUMENTATION = {
     ]
 }
 
-def main():
+def main(db_name=None):
     """Main function to add documentation to the database"""
     print("Connecting to MongoDB...")
     client = MongoClient('mongodb://localhost:27017/')
-    db = client['accessibility_tests']
+    
+    # Use the specified database name or default
+    if db_name is None:
+        db_name = 'accessibility_tests'
+        print(f"Warning: No database name specified. Using default database '{db_name}'.")
+    
+    print(f"Using database: {db_name}")
+    db = client[db_name]
     
     # Get the most recent test run
     latest_run = db.test_runs.find_one(sort=[('timestamp_start', -1)])
@@ -296,9 +303,17 @@ def main():
     
     # Now run the XLS generator to create the report
     print("\nGenerating XLS report...")
-    os.system('python3 src/xls_generator/xls_generator.py')
+    if db_name:
+        os.system(f'python3 src/xls_generator/xls_generator.py --database "{db_name}"')
+    else:
+        os.system('python3 src/xls_generator/xls_generator.py')
     
     print("\nDone! Check the documentation sheet in the generated Excel file.")
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser(description='Add documentation directly to a MongoDB database')
+    parser.add_argument('--database', '-db', help='MongoDB database name to use (default: accessibility_tests)')
+    args = parser.parse_args()
+    
+    main(db_name=args.database)

@@ -474,31 +474,94 @@ class AccessibilityReportGenerator:
         
         # First, explicitly fetch test documentation from test_runs collection
         # This ensures we get documentation for all tests, even those not in the current results
-        print("\nExplicitly fetching documentation from test_runs collection...")
+        print("\n=== DETAILED DOCUMENTATION COLLECTION DEBUG ===")
+        print("Explicitly fetching documentation from test_runs collection...")
         try:
             # Get all test runs to look for documentation
             all_test_runs = list(self.db.test_runs.find({}))
+            print(f"Found {len(all_test_runs)} test runs in the database")
+            
+            # Look for specific tests we want to document
+            target_tests = ['animations', 'colors', 'forms']
+            print(f"Specifically looking for documentation for: {', '.join(target_tests)}")
+            
             for run in all_test_runs:
+                print(f"\nInspecting test run: {run.get('_id')} ({run.get('name', 'unnamed run')})")
+                
+                # Debug the test run
                 if 'documentation' in run:
-                    print(f"Found documentation in test run: {run.get('_id')}")
-                    for test_name, doc in run['documentation'].items():
-                        test_key = test_name.replace('-', '_').lower()
-                        if test_key not in self.test_documentation:
-                            print(f"  Adding documentation for {test_name}")
-                            self.test_documentation[test_key] = doc
+                    doc_count = len(run['documentation'])
+                    print(f"  Found documentation with {doc_count} test types")
+                    print(f"  Documentation keys: {list(run['documentation'].keys())}")
+                    
+                    # Check for our specific targets
+                    for target in target_tests:
+                        if target in run['documentation']:
+                            print(f"  ✓ Found '{target}' documentation in this test run")
+                        elif any(k.startswith(target) or k.endswith(target) for k in run['documentation'].keys()):
+                            matching_keys = [k for k in run['documentation'].keys() if k.startswith(target) or k.endswith(target)]
+                            print(f"  ⚠ Found similar keys to '{target}': {matching_keys}")
                         else:
-                            print(f"  Already have documentation for {test_name}")
+                            print(f"  ✗ Did not find '{target}' documentation in this test run")
+                    
+                    # Process all documentation
+                    for test_name, doc in run['documentation'].items():
+                        # Store multiple variants of the name to improve matching
+                        test_keys = [
+                            test_name.lower(),
+                            test_name.replace('-', '_').lower(),
+                            test_name.replace('_', '-').lower()
+                        ]
+                        
+                        # Use the best key (original first)
+                        for test_key in test_keys:
+                            if test_key not in self.test_documentation:
+                                print(f"  Adding documentation for {test_name} with key {test_key}")
+                                self.test_documentation[test_key] = doc
+                                # Also add variant keys for improved matching
+                                if test_key != test_name.lower():
+                                    self.test_documentation[test_name.lower()] = doc
+                                break
+                            
+                # Check for inline documentation in test results
+                if 'tests' in run:
+                    print(f"  This run has a 'tests' field with {len(run.get('tests', {}))} items")
+                    tests = run.get('tests', {})
+                    for test_name, test_data in tests.items():
+                        if isinstance(test_data, dict) and 'documentation' in test_data:
+                            print(f"  Found inline documentation for {test_name} in tests field")
+                            self.test_documentation[test_name.lower()] = test_data['documentation']
+                            
         except Exception as e:
             print(f"Error fetching documentation from test_runs: {e}")
+            import traceback
+            traceback.print_exc()
         
         # Then, collect test documentation from results
         self.collect_test_documentation(results)
         
         # For debugging: print all test documentation found
-        print("\nDocumentation found for the following tests:")
+        print("\n=== FINAL DOCUMENTATION SUMMARY ===")
+        print(f"Total test types with documentation: {len(self.test_documentation)}")
+        
+        # Check specifically for our target tests
+        target_tests = ['animations', 'colors', 'forms']
+        for target in target_tests:
+            found = False
+            for key in self.test_documentation.keys():
+                if key == target or key.startswith(target) or key.endswith(target):
+                    found = True
+                    print(f"✓ '{target}' documentation found as key '{key}'")
+                    break
+            if not found:
+                print(f"✗ '{target}' documentation NOT FOUND in any key")
+        
+        print("\nAll documented test types:")
         for test_name in sorted(self.test_documentation.keys()):
-            tests_count = len(self.test_documentation[test_name].get('tests', []))
-            print(f"  - {test_name} ({tests_count} subtests)")
+            test_obj = self.test_documentation[test_name]
+            display_name = test_obj.get('testName', test_name)
+            tests_count = len(test_obj.get('tests', []))
+            print(f"  - {test_name} → {display_name} ({tests_count} subtests)")
         
         summary = self.calculate_summary(test_run_ids)
         

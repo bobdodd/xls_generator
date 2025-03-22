@@ -427,45 +427,159 @@ class AccessibilityReportGenerator:
 
     def format_detailed_results(self, results):
         """Format detailed results for Excel with improved JSON formatting"""
+        # Each page will have multiple columns based on breakpoints
+        
+        # First, collect all URLs and all breakpoints
+        urls = []
+        all_breakpoints = set()
+        
+        for result in results:
+            url = result.get('url', 'Unknown URL')
+            urls.append(url)
+            accessibility = result.get('results', {}).get('accessibility', {})
+            
+            if accessibility and 'responsive_testing' in accessibility:
+                resp_testing = accessibility['responsive_testing']
+                if 'breakpoints' in resp_testing:
+                    for bp in resp_testing['breakpoints']:
+                        all_breakpoints.add(str(bp))
+        
+        # Sort breakpoints numerically
+        sorted_breakpoints = sorted(all_breakpoints, key=lambda x: int(x) if x.isdigit() else 0)
+        
+        # Create breakpoint-specific columns for each URL
+        url_bp_columns = {}
+        for url in urls:
+            # Base URL column without breakpoint
+            url_bp_columns[url] = url
+            
+            # Create URL-breakpoint columns for each breakpoint
+            for bp in sorted_breakpoints:
+                url_bp_columns[f"{url}:{bp}"] = f"{url} @ {bp}px"
+        
+        # Initialize data dictionary with test names as keys
         formatted_data = {}
         
-        def process_dict(d, prefix=''):
-            items = {}
-            for key, value in d.items():
-                full_key = f"{prefix}.{key}" if prefix else key
-                if isinstance(value, dict):
-                    items.update(process_dict(value, full_key))
-                elif isinstance(value, list):
-                    items[full_key] = json.dumps(value)
-                else:
-                    items[full_key] = str(value)
-            return items
-
+        # Process regular (non-responsive) test results
         for result in results:
             url = result.get('url', 'Unknown URL')
             accessibility = result.get('results', {}).get('accessibility', {})
             
             if accessibility and 'tests' in accessibility:
-                tests = accessibility['tests']
-                
-                for test_name, test_results in tests.items():
+                for test_name, test_results in accessibility['tests'].items():
+                    # Create a key for this test
+                    if test_name not in formatted_data:
+                        formatted_data[test_name] = {}
+                    
+                    # Process dictionary test results
                     if isinstance(test_results, dict):
-                        # Process the dictionary to get flat structure with full paths
-                        flat_data = process_dict(test_results, test_name)
+                        # Flatten the structure for easier Excel formatting
+                        flat_data = self._flatten_dict(test_results, test_name)
                         for key, value in flat_data.items():
                             if key not in formatted_data:
                                 formatted_data[key] = {}
-                            formatted_data[key][url] = value
+                            formatted_data[key][url_bp_columns[url]] = value
                     else:
-                        if test_name not in formatted_data:
-                            formatted_data[test_name] = {}
-                        formatted_data[test_name][url] = str(test_results)
+                        # Simple test result
+                        formatted_data[test_name][url_bp_columns[url]] = str(test_results)
+        
+        # Process responsive testing results with breakpoint-specific columns
+        for result in results:
+            url = result.get('url', 'Unknown URL')
+            accessibility = result.get('results', {}).get('accessibility', {})
+            
+            if accessibility and 'responsive_testing' in accessibility:
+                resp_testing = accessibility['responsive_testing']
+                
+                # Add basic responsive testing summary data
+                if 'responsive_testing.summary' not in formatted_data:
+                    formatted_data['responsive_testing.summary'] = {}
+                
+                # Add breakpoints tested
+                if 'breakpoints' in resp_testing:
+                    formatted_data['responsive_testing.breakpoints_tested'] = formatted_data.get('responsive_testing.breakpoints_tested', {})
+                    formatted_data['responsive_testing.breakpoints_tested'][url_bp_columns[url]] = str(resp_testing['breakpoints'])
+                
+                # Add consolidated summary information
+                if 'consolidated' in resp_testing and 'summary' in resp_testing['consolidated']:
+                    summary = resp_testing['consolidated']['summary']
+                    for key, value in summary.items():
+                        summary_key = f"responsive_testing.summary.{key}"
+                        if summary_key not in formatted_data:
+                            formatted_data[summary_key] = {}
+                        formatted_data[summary_key][url_bp_columns[url]] = str(value)
+                
+                # Process breakpoint-specific results
+                for bp_str, bp_results in resp_testing.get('breakpoint_results', {}).items():
+                    # Create the breakpoint-specific column key
+                    bp_url = f"{url}:{bp_str}"
+                    if bp_url not in url_bp_columns:
+                        # Skip if this breakpoint wasn't discovered earlier
+                        continue
+                        
+                    if 'tests' in bp_results and 'responsive' in bp_results['tests']:
+                        resp_tests = bp_results['tests']['responsive']
+                        if 'tests' in resp_tests:
+                            # Process each test type at this breakpoint
+                            for test_name, test_data in resp_tests['tests'].items():
+                                # Create keys for this responsive test
+                                resp_key = f"responsive.{test_name}"
+                                if resp_key not in formatted_data:
+                                    formatted_data[resp_key] = {}
+                                
+                                # Add issue information
+                                issues = test_data.get('issues', [])
+                                issue_count = len(issues)
+                                
+                                if issue_count > 0:
+                                    # Summarize the issues
+                                    details = []
+                                    for issue in issues:
+                                        element = f"{issue.get('element', '')} {issue.get('id', '')}".strip()
+                                        detail = issue.get('details', '')
+                                        severity = issue.get('severity', '')
+                                        details.append(f"{element}: {detail} ({severity})")
+                                    
+                                    # Add to the column for this URL + breakpoint
+                                    issue_summary = f"{issue_count} issue(s): {'; '.join(details[:2])}"
+                                    if len(details) > 2:
+                                        issue_summary += f" and {len(details) - 2} more"
+                                    formatted_data[resp_key][url_bp_columns[bp_url]] = issue_summary
+                                else:
+                                    # No issues found
+                                    formatted_data[resp_key][url_bp_columns[bp_url]] = "No issues"
         
         # Convert to DataFrame
         df = pd.DataFrame.from_dict(formatted_data, orient='index')
-        df = df.sort_index()
         
+        # Sort columns by URL and breakpoint
+        # URLs without breakpoints first, then same URLs with breakpoints in ascending order
+        def column_sort_key(col):
+            if ' @ ' in col:
+                url, bp = col.split(' @ ')
+                bp = bp.replace('px', '')
+                return (url, int(bp) if bp.isdigit() else 0)
+            return (col, 0)  # URLs without breakpoints sort first
+        
+        sorted_columns = sorted(df.columns, key=column_sort_key)
+        if sorted_columns:
+            df = df[sorted_columns]
+        
+        df = df.sort_index()
         return df
+        
+    def _flatten_dict(self, d, prefix=''):
+        """Helper to flatten a nested dictionary with full path keys"""
+        items = {}
+        for key, value in d.items():
+            full_key = f"{prefix}.{key}" if prefix else key
+            if isinstance(value, dict):
+                items.update(self._flatten_dict(value, full_key))
+            elif isinstance(value, list):
+                items[full_key] = json.dumps(value)
+            else:
+                items[full_key] = str(value)
+        return items
 
     def generate_excel_report(self, test_run_ids=None, output_file='accessibility_report.xlsx', db_name=None):
         """Generate Excel report with multiple sheets using all test runs"""
@@ -783,6 +897,675 @@ class AccessibilityReportGenerator:
             detailed_df = self.format_detailed_results(results)
             detailed_df.to_excel(writer, sheet_name='Detailed Results')
             
+            # Create a new, more readable responsive testing sheet
+            responsive_matrix_data = []
+            test_types = set()  # Track all test types we find
+            
+            # First pass - collect all test types
+            for result in results:
+                accessibility = result.get('results', {}).get('accessibility', {})
+                if accessibility and 'responsive_testing' in accessibility:
+                    resp_testing = accessibility['responsive_testing']
+                    
+                    for bp, bp_results in resp_testing.get('breakpoint_results', {}).items():
+                        if 'tests' in bp_results and 'responsive' in bp_results['tests'] and 'tests' in bp_results['tests']['responsive']:
+                            for test_name in bp_results['tests']['responsive']['tests'].keys():
+                                test_types.add(test_name)
+            
+            # Second pass - create rows for URL + breakpoint + test type
+            for result in results:
+                url = result.get('url', 'Unknown URL')
+                domain_parts = url.replace('https://', '').replace('http://', '').split('/')
+                domain = domain_parts[0]
+                page = '/'.join(domain_parts[1:]) if len(domain_parts) > 1 else ''
+                
+                accessibility = result.get('results', {}).get('accessibility', {})
+                if accessibility and 'responsive_testing' in accessibility:
+                    resp_testing = accessibility['responsive_testing']
+                    
+                    # Get all breakpoints
+                    breakpoints = resp_testing.get('breakpoints', [])
+                    
+                    # Process each breakpoint
+                    for bp in breakpoints:
+                        bp_str = str(bp)
+                        
+                        # Look for results for this breakpoint
+                        if bp_str in resp_testing.get('breakpoint_results', {}):
+                            bp_results = resp_testing['breakpoint_results'][bp_str]
+                            
+                            if 'tests' in bp_results and 'responsive' in bp_results['tests'] and 'tests' in bp_results['tests']['responsive']:
+                                resp_tests = bp_results['tests']['responsive']['tests']
+                                
+                                # Process each test type
+                                for test_name in sorted(test_types):
+                                    # Create a new row for each test at this breakpoint
+                                    row_data = {
+                                        'Domain': domain,
+                                        'Page': page,
+                                        'Breakpoint': bp,
+                                        'Test': test_name
+                                    }
+                                    
+                                    # Add status and details for this test
+                                    if test_name in resp_tests:
+                                        test_data = resp_tests[test_name]
+                                        issues = test_data.get('issues', [])
+                                        issue_count = len(issues)
+                                        
+                                        if issue_count > 0:
+                                            row_data['Status'] = 'Issues Found'
+                                            row_data['Issue Count'] = issue_count
+                                            
+                                            # Extract issue details
+                                            issue_details = []
+                                            for issue in issues:
+                                                element = f"{issue.get('element', '')} {issue.get('id', '')}".strip()
+                                                detail = issue.get('details', '')
+                                                severity = issue.get('severity', '')
+                                                issue_details.append(f"{element}: {detail} ({severity})")
+                                            
+                                            row_data['Issue Details'] = '\n'.join(issue_details[:3])
+                                            if len(issue_details) > 3:
+                                                row_data['Issue Details'] += f"\n...and {len(issue_details) - 3} more"
+                                        else:
+                                            row_data['Status'] = 'Pass'
+                                            row_data['Issue Count'] = 0
+                                            row_data['Issue Details'] = 'No issues detected'
+                                    else:
+                                        # Test not run at this breakpoint
+                                        row_data['Status'] = 'Not Tested'
+                                        row_data['Issue Count'] = '-'
+                                        row_data['Issue Details'] = '-'
+                                    
+                                    # Add the row
+                                    responsive_matrix_data.append(row_data)
+            
+            # Create the responsive matrix sheet
+            if responsive_matrix_data:
+                # Sort data by domain, page, breakpoint, test
+                responsive_matrix_data.sort(key=lambda x: (x['Domain'], x['Page'], x['Breakpoint'], x['Test']))
+                resp_matrix_df = pd.DataFrame(responsive_matrix_data)
+                resp_matrix_df.to_excel(writer, sheet_name='Responsive Testing Matrix', index=False)
+                
+            # Create a breakpoint summary sheet
+            breakpoint_summary_data = []
+            
+            # Track all distinct breakpoints and issue counts for visualization
+            all_breakpoints = set()
+            issue_by_breakpoint = defaultdict(int)
+            issue_by_type = defaultdict(int)
+            domains_with_issues = set()
+            
+            for result in results:
+                url = result.get('url', 'Unknown URL')
+                domain_parts = url.replace('https://', '').replace('http://', '').split('/')
+                domain = domain_parts[0]
+                
+                accessibility = result.get('results', {}).get('accessibility', {})
+                
+                if accessibility and 'responsive_testing' in accessibility:
+                    resp_testing = accessibility['responsive_testing']
+                    
+                    # Get all breakpoints tested
+                    breakpoints = resp_testing.get('breakpoints', [])
+                    for bp in breakpoints:
+                        all_breakpoints.add(int(bp))
+                    
+                    # Get consolidated results for test summary
+                    if 'consolidated' in resp_testing:
+                        consolidated = resp_testing['consolidated']
+                        
+                        # Record issue types for chart
+                        if 'summary' in consolidated:
+                            summary = consolidated['summary']
+                            issue_by_type['Overflow'] += summary.get('overflowIssues', 0)
+                            issue_by_type['Touch Target'] += summary.get('touchTargetIssues', 0)
+                            issue_by_type['Font Scaling'] += summary.get('fontScalingIssues', 0)
+                            issue_by_type['Fixed Position'] += summary.get('fixedPositionIssues', 0)
+                            issue_by_type['Content Stacking'] += summary.get('contentStackingIssues', 0)
+                        
+                        # Add summary row for this URL
+                        breakpoint_summary_data.append({
+                            'URL': url,
+                            'Total Breakpoints Tested': len(breakpoints),
+                            'Breakpoints with Issues': consolidated.get('summary', {}).get('affectedBreakpoints', 0),
+                            'Total Issues': consolidated.get('summary', {}).get('totalIssues', 0),
+                            'Overflow Issues': consolidated.get('summary', {}).get('overflowIssues', 0),
+                            'Touch Target Issues': consolidated.get('summary', {}).get('touchTargetIssues', 0),
+                            'Font Scaling Issues': consolidated.get('summary', {}).get('fontScalingIssues', 0),
+                            'Fixed Position Issues': consolidated.get('summary', {}).get('fixedPositionIssues', 0),
+                            'Content Stacking Issues': consolidated.get('summary', {}).get('contentStackingIssues', 0),
+                            'Breakpoints Tested': ', '.join(map(str, sorted(breakpoints)))
+                        })
+                        
+                        # Track if domain has issues
+                        if consolidated.get('summary', {}).get('totalIssues', 0) > 0:
+                            domains_with_issues.add(domain)
+                        
+                        # Add breakpoint-specific rows
+                        for bp, bp_results in resp_testing.get('breakpoint_results', {}).items():
+                            if 'tests' in bp_results and 'responsive' in bp_results['tests']:
+                                resp_data = bp_results['tests']['responsive']
+                                
+                                # Count total issues for this breakpoint
+                                total_issues = 0
+                                issue_details = []
+                                
+                                # Process each test type
+                                for test_name, test_data in resp_data.get('tests', {}).items():
+                                    if 'issues' in test_data:
+                                        issues_count = len(test_data['issues'])
+                                        if issues_count > 0:
+                                            total_issues += issues_count
+                                            issue_details.append(f"{test_name}: {issues_count}")
+                                
+                                # Record issues by breakpoint for charts
+                                if total_issues > 0:
+                                    issue_by_breakpoint[int(bp)] += total_issues
+                                    
+                                    breakpoint_summary_data.append({
+                                        'URL': f"  -- {url} @ {bp}px",
+                                        'Total Breakpoints Tested': '',
+                                        'Breakpoints with Issues': '',
+                                        'Total Issues': total_issues,
+                                        'Overflow Issues': '',
+                                        'Touch Target Issues': '',
+                                        'Font Scaling Issues': '',
+                                        'Fixed Position Issues': '',
+                                        'Content Stacking Issues': '',
+                                        'Breakpoints Tested': ', '.join(issue_details)
+                                    })
+            
+            # Only create the breakpoint summary sheet if we have data
+            if breakpoint_summary_data:
+                bp_df = pd.DataFrame(breakpoint_summary_data)
+                bp_df.to_excel(writer, sheet_name='Responsive Breakpoint Summary', index=False)
+            
+            # Create a visualization sheet if we have responsive data
+            if all_breakpoints and (issue_by_breakpoint or issue_by_type):
+                # Create a new sheet for visualizations
+                workbook = writer.book
+                vis_sheet = workbook.create_sheet('Responsive Visualizations')
+                
+                # Create the data tables for the charts
+                vis_sheet['A1'] = 'Issues by Breakpoint'
+                vis_sheet['A2'] = 'Breakpoint (px)'
+                vis_sheet['B2'] = 'Issue Count'
+                
+                # Sort breakpoints for chart
+                sorted_breakpoints = sorted(all_breakpoints)
+                
+                # Add breakpoint data
+                row = 3
+                for bp in sorted_breakpoints:
+                    vis_sheet[f'A{row}'] = bp
+                    vis_sheet[f'B{row}'] = issue_by_breakpoint.get(bp, 0)
+                    row += 1
+                
+                # Create Breakpoint chart using openpyxl
+                chart = openpyxl.chart.BarChart()
+                chart.title = "Responsive Accessibility Issues by Breakpoint"
+                chart.style = 10  # Choose a style (1-48)
+                chart.x_axis.title = "Breakpoint (px)"
+                chart.y_axis.title = "Number of Issues"
+                
+                # Add the data
+                bp_data = openpyxl.chart.Reference(
+                    vis_sheet, 
+                    min_col=2, 
+                    min_row=2, 
+                    max_row=2+len(sorted_breakpoints)
+                )
+                bp_labels = openpyxl.chart.Reference(
+                    vis_sheet, 
+                    min_col=1, 
+                    min_row=3, 
+                    max_row=2+len(sorted_breakpoints)
+                )
+                chart.add_data(bp_data, titles_from_data=True)
+                chart.set_categories(bp_labels)
+                
+                # Make the chart larger
+                chart.width = 30
+                chart.height = 15
+                
+                # Add the chart to the sheet
+                vis_sheet.add_chart(chart, "A15")
+                
+                # Add issue type data table
+                vis_sheet['D1'] = 'Issues by Type'
+                vis_sheet['D2'] = 'Issue Type'
+                vis_sheet['E2'] = 'Issue Count'
+                
+                # Add the issue type data
+                row = 3
+                for issue_type, count in issue_by_type.items():
+                    vis_sheet[f'D{row}'] = issue_type
+                    vis_sheet[f'E{row}'] = count
+                    row += 1
+                
+                # Create issue type chart
+                pie_chart = openpyxl.chart.PieChart()
+                pie_chart.title = "Distribution of Responsive Issues by Type"
+                pie_chart.style = 10
+                
+                # Add the data
+                type_data = openpyxl.chart.Reference(
+                    vis_sheet, 
+                    min_col=5, 
+                    min_row=2, 
+                    max_row=2+len(issue_by_type)
+                )
+                type_labels = openpyxl.chart.Reference(
+                    vis_sheet, 
+                    min_col=4, 
+                    min_row=3, 
+                    max_row=2+len(issue_by_type)
+                )
+                pie_chart.add_data(type_data, titles_from_data=True)
+                pie_chart.set_categories(type_labels)
+                
+                # Show data labels
+                slice_series = pie_chart.series[0]
+                slice_series.data_labels = openpyxl.chart.label.DataLabelList()
+                slice_series.data_labels.showVal = False
+                slice_series.data_labels.showPercent = True
+                slice_series.data_labels.showCatName = True
+                
+                # Make the chart larger
+                pie_chart.width = 20
+                pie_chart.height = 15
+                
+                # Add the chart to the sheet
+                vis_sheet.add_chart(pie_chart, "D15")
+                
+                # Create a heatmap-like table showing breakpoints with issues for all domains
+                if domains_with_issues:
+                    vis_sheet['G1'] = 'Breakpoint Issues Heatmap by Domain'
+                    vis_sheet['G1'].font = openpyxl.styles.Font(size=14, bold=True)
+                    
+                    # Add breakpoint headers
+                    col = 8  # Start at column H (col index 8)
+                    for bp in sorted_breakpoints:
+                        cell = vis_sheet.cell(row=2, column=col)
+                        cell.value = f"{bp}px"
+                        cell.font = openpyxl.styles.Font(bold=True)
+                        cell.alignment = openpyxl.styles.Alignment(horizontal='center')
+                        cell.fill = openpyxl.styles.PatternFill(
+                            start_color="E6E6E6",
+                            end_color="E6E6E6",
+                            fill_type="solid"
+                        )
+                        col += 1
+                    
+                    # Track domain-breakpoint issue counts for heatmap
+                    domain_bp_issues = {}
+                    
+                    # Compile issue counts for each domain at each breakpoint
+                    for result in results:
+                        url = result.get('url', 'Unknown URL')
+                        domain_parts = url.replace('https://', '').replace('http://', '').split('/')
+                        domain = domain_parts[0]
+                        
+                        accessibility = result.get('results', {}).get('accessibility', {})
+                        
+                        if accessibility and 'responsive_testing' in accessibility:
+                            resp_testing = accessibility['responsive_testing']
+                            
+                            # Initialize domain in tracking dict if needed
+                            if domain not in domain_bp_issues:
+                                domain_bp_issues[domain] = defaultdict(int)
+                            
+                            # Process each breakpoint result
+                            for bp, bp_results in resp_testing.get('breakpoint_results', {}).items():
+                                if 'tests' in bp_results and 'responsive' in bp_results['tests']:
+                                    resp_data = bp_results['tests']['responsive']
+                                    
+                                    # Count total issues for this breakpoint
+                                    total_issues = 0
+                                    
+                                    # Process each test type
+                                    for test_name, test_data in resp_data.get('tests', {}).items():
+                                        if 'issues' in test_data:
+                                            total_issues += len(test_data['issues'])
+                                    
+                                    # Add issues to domain-breakpoint tracking
+                                    if total_issues > 0:
+                                        domain_bp_issues[domain][int(bp)] += total_issues
+                    
+                    # Add domain rows with heatmap coloring
+                    row = 3
+                    for domain in sorted(domains_with_issues):
+                        # Add domain cell
+                        domain_cell = vis_sheet.cell(row=row, column=7)  # Column G
+                        domain_cell.value = domain
+                        domain_cell.font = openpyxl.styles.Font(bold=True)
+                        
+                        # Add cells for each breakpoint with heatmap coloring
+                        col = 8  # Start at column H
+                        for bp in sorted_breakpoints:
+                            cell = vis_sheet.cell(row=row, column=col)
+                            
+                            # Get issue count for this domain-breakpoint combination
+                            issue_count = domain_bp_issues.get(domain, {}).get(bp, 0)
+                            
+                            # Set the value
+                            cell.value = issue_count if issue_count > 0 else ""
+                            cell.alignment = openpyxl.styles.Alignment(horizontal='center')
+                            
+                            # Apply heatmap coloring based on issue count
+                            if issue_count > 10:  # High severity
+                                cell.fill = openpyxl.styles.PatternFill(
+                                    start_color="FF9999",  # Darker red
+                                    end_color="FF9999",
+                                    fill_type="solid"
+                                )
+                                cell.font = openpyxl.styles.Font(bold=True)
+                            elif issue_count > 5:  # Medium-high severity
+                                cell.fill = openpyxl.styles.PatternFill(
+                                    start_color="FFCCCC",  # Light red
+                                    end_color="FFCCCC",
+                                    fill_type="solid"
+                                )
+                            elif issue_count > 2:  # Medium severity
+                                cell.fill = openpyxl.styles.PatternFill(
+                                    start_color="FFE0B2",  # Light orange
+                                    end_color="FFE0B2",
+                                    fill_type="solid"
+                                )
+                            elif issue_count > 0:  # Low severity
+                                cell.fill = openpyxl.styles.PatternFill(
+                                    start_color="FFF9C4",  # Light yellow
+                                    end_color="FFF9C4",
+                                    fill_type="solid"
+                                )
+                            
+                            col += 1
+                        
+                        row += 1
+                    
+                    # Add a legend for the heatmap
+                    legend_row = row + 2
+                    vis_sheet.cell(row=legend_row, column=7).value = "Heatmap Legend:"
+                    vis_sheet.cell(row=legend_row, column=7).font = openpyxl.styles.Font(bold=True)
+                    
+                    # High severity
+                    vis_sheet.cell(row=legend_row, column=8).fill = openpyxl.styles.PatternFill(
+                        start_color="FF9999", end_color="FF9999", fill_type="solid")
+                    vis_sheet.cell(row=legend_row, column=9).value = "> 10 issues (High)"
+                    
+                    # Medium-high severity
+                    vis_sheet.cell(row=legend_row+1, column=8).fill = openpyxl.styles.PatternFill(
+                        start_color="FFCCCC", end_color="FFCCCC", fill_type="solid")
+                    vis_sheet.cell(row=legend_row+1, column=9).value = "6-10 issues (Medium-High)"
+                    
+                    # Medium severity
+                    vis_sheet.cell(row=legend_row+2, column=8).fill = openpyxl.styles.PatternFill(
+                        start_color="FFE0B2", end_color="FFE0B2", fill_type="solid")
+                    vis_sheet.cell(row=legend_row+2, column=9).value = "3-5 issues (Medium)"
+                    
+                    # Low severity
+                    vis_sheet.cell(row=legend_row+3, column=8).fill = openpyxl.styles.PatternFill(
+                        start_color="FFF9C4", end_color="FFF9C4", fill_type="solid")
+                    vis_sheet.cell(row=legend_row+3, column=9).value = "1-2 issues (Low)"
+                    
+                    # Add trend analysis - issues per test type across breakpoints
+                    trend_row = legend_row + 6
+                    vis_sheet.cell(row=trend_row, column=7).value = "Issue Trends by Test Type"
+                    vis_sheet.cell(row=trend_row, column=7).font = openpyxl.styles.Font(size=14, bold=True)
+                    
+                    # Collect issue data by test type across breakpoints
+                    test_types = ['overflow', 'touchTargets', 'fontScaling', 'fixedPosition', 'contentStacking']
+                    test_type_labels = {
+                        'overflow': 'Content Overflow', 
+                        'touchTargets': 'Touch Targets',
+                        'fontScaling': 'Font Scaling',
+                        'fixedPosition': 'Fixed Position',
+                        'contentStacking': 'Content Stacking'
+                    }
+                    
+                    # Create the trend table headers with breakpoints
+                    trend_row += 1
+                    vis_sheet.cell(row=trend_row, column=7).value = "Test Type"
+                    col = 8
+                    for bp in sorted_breakpoints:
+                        vis_sheet.cell(row=trend_row, column=col).value = f"{bp}px"
+                        vis_sheet.cell(row=trend_row, column=col).font = openpyxl.styles.Font(bold=True)
+                        vis_sheet.cell(row=trend_row, column=col).alignment = openpyxl.styles.Alignment(horizontal='center')
+                        vis_sheet.cell(row=trend_row, column=col).fill = openpyxl.styles.PatternFill(
+                            start_color="E6E6E6", end_color="E6E6E6", fill_type="solid")
+                        col += 1
+                    
+                    # Collect data by test type across breakpoints
+                    test_type_data = {}
+                    for test_type in test_types:
+                        test_type_data[test_type] = defaultdict(int)
+                    
+                    # Process all results to collect data
+                    for result in results:
+                        accessibility = result.get('results', {}).get('accessibility', {})
+                        if accessibility and 'responsive_testing' in accessibility:
+                            resp_testing = accessibility['responsive_testing']
+                            
+                            for bp, bp_results in resp_testing.get('breakpoint_results', {}).items():
+                                if 'tests' in bp_results and 'responsive' in bp_results['tests']:
+                                    resp_data = bp_results['tests']['responsive']
+                                    
+                                    for test_name, test_data in resp_data.get('tests', {}).items():
+                                        if test_name in test_types and 'issues' in test_data:
+                                            test_type_data[test_name][int(bp)] += len(test_data['issues'])
+                    
+                    # Add each test type row
+                    trend_row += 1
+                    for test_type in test_types:
+                        vis_sheet.cell(row=trend_row, column=7).value = test_type_labels.get(test_type, test_type)
+                        vis_sheet.cell(row=trend_row, column=7).font = openpyxl.styles.Font(bold=True)
+                        
+                        col = 8
+                        for bp in sorted_breakpoints:
+                            # Get issue count for this test type and breakpoint
+                            issue_count = test_type_data[test_type][bp]
+                            
+                            # Add to the cell
+                            cell = vis_sheet.cell(row=trend_row, column=col)
+                            cell.value = issue_count if issue_count > 0 else ""
+                            cell.alignment = openpyxl.styles.Alignment(horizontal='center')
+                            
+                            # Apply coloring based on count
+                            if issue_count > 0:
+                                # Use test-specific color scheme
+                                if test_type == 'overflow':
+                                    base_color = "FFCCCC"  # Red
+                                elif test_type == 'touchTargets':
+                                    base_color = "FFE0B2"  # Orange
+                                elif test_type == 'fontScaling':
+                                    base_color = "FFF9C4"  # Yellow
+                                elif test_type == 'fixedPosition':
+                                    base_color = "C8E6C9"  # Green
+                                elif test_type == 'contentStacking':
+                                    base_color = "BBDEFB"  # Blue
+                                else:
+                                    base_color = "E1BEE7"  # Purple
+                                
+                                cell.fill = openpyxl.styles.PatternFill(
+                                    start_color=base_color,
+                                    end_color=base_color,
+                                    fill_type="solid"
+                                )
+                                
+                                # Bold for higher counts
+                                if issue_count > 5:
+                                    cell.font = openpyxl.styles.Font(bold=True)
+                            
+                            col += 1
+                        
+                        trend_row += 1
+                    
+                    # Create a column chart instead of line chart - simpler to work with
+                    trend_row += 2
+                    col_chart = openpyxl.chart.BarChart()
+                    col_chart.type = "col"
+                    col_chart.title = "Responsive Issues by Test Type Across Breakpoints"
+                    col_chart.style = 12
+                    col_chart.x_axis.title = "Breakpoint (px)"
+                    col_chart.y_axis.title = "Number of Issues"
+                    col_chart.grouping = "stacked"
+                    
+                    # First, let's ensure our labels are in the worksheet
+                    # Add a column for labels
+                    label_col = 7
+                    for i, test_type in enumerate(test_types):
+                        label_row = trend_row - len(test_types) + i
+                        vis_sheet.cell(row=label_row, column=label_col).value = test_type_labels.get(test_type, test_type)
+                    
+                    # Create data for chart
+                    data = openpyxl.chart.Reference(
+                        vis_sheet,
+                        min_col=8,
+                        max_col=8 + len(sorted_breakpoints) - 1,
+                        min_row=trend_row - len(test_types),
+                        max_row=trend_row - 1
+                    )
+                    
+                    # Create categories for X axis (breakpoints)
+                    cats = openpyxl.chart.Reference(
+                        vis_sheet,
+                        min_col=8,
+                        max_col=8 + len(sorted_breakpoints) - 1,
+                        min_row=trend_row - len(test_types) - 1,
+                        max_row=trend_row - len(test_types) - 1
+                    )
+                    
+                    # Create series titles
+                    series_titles = openpyxl.chart.Reference(
+                        vis_sheet,
+                        min_col=7,
+                        max_col=7,
+                        min_row=trend_row - len(test_types),
+                        max_row=trend_row - 1
+                    )
+                    
+                    # Add the data
+                    col_chart.add_data(data, titles_from_data=False)
+                    col_chart.set_categories(cats)
+                    col_chart.dataLabels = openpyxl.chart.label.DataLabelList()
+                    col_chart.dataLabels.showVal = True
+                    
+                    # Don't try to set the series titles directly - use a separate legend instead
+                    # Create a legend with proper positioning
+                    col_chart.legend = openpyxl.chart.legend.Legend()
+                    col_chart.legend.position = 'r'  # Position legend to the right
+                    
+                    # Make the chart larger
+                    col_chart.width = 30
+                    col_chart.height = 15
+                    
+                    # Add the chart to the sheet
+                    vis_sheet.add_chart(col_chart, "A40")
+                    
+                    # Add note about the trend analysis
+                    trend_note_row = trend_row + 20
+                    vis_sheet.cell(row=trend_note_row, column=7).value = "Note: The trend analysis shows which test types have the most issues at each breakpoint."
+                    vis_sheet.cell(row=trend_note_row, column=7).font = openpyxl.styles.Font(italic=True)
+                    
+                    # Add mobile vs desktop comparison section
+                    mobile_vs_desktop_row = trend_note_row + 3
+                    vis_sheet.cell(row=mobile_vs_desktop_row, column=7).value = "Mobile vs Desktop Comparison"
+                    vis_sheet.cell(row=mobile_vs_desktop_row, column=7).font = openpyxl.styles.Font(size=14, bold=True)
+                    
+                    # Create the comparison table headers
+                    vis_sheet.cell(row=mobile_vs_desktop_row+1, column=7).value = "Issue Type"
+                    vis_sheet.cell(row=mobile_vs_desktop_row+1, column=8).value = "Mobile (<= 768px)"
+                    vis_sheet.cell(row=mobile_vs_desktop_row+1, column=9).value = "Desktop (> 768px)"
+                    
+                    # Format headers
+                    for col in range(7, 10):
+                        cell = vis_sheet.cell(row=mobile_vs_desktop_row+1, column=col)
+                        cell.font = openpyxl.styles.Font(bold=True)
+                        cell.alignment = openpyxl.styles.Alignment(horizontal='center')
+                        cell.fill = openpyxl.styles.PatternFill(
+                            start_color="E6E6E6", end_color="E6E6E6", fill_type="solid")
+                    
+                    # Calculate mobile vs desktop issues by test type
+                    mobile_desktop_data = {}
+                    for test_type in test_types:
+                        mobile_desktop_data[test_type] = {'mobile': 0, 'desktop': 0}
+                        
+                        for bp, count in test_type_data[test_type].items():
+                            if bp <= 768:
+                                mobile_desktop_data[test_type]['mobile'] += count
+                            else:
+                                mobile_desktop_data[test_type]['desktop'] += count
+                    
+                    # Add data rows
+                    for i, test_type in enumerate(test_types):
+                        row = mobile_vs_desktop_row + 2 + i
+                        vis_sheet.cell(row=row, column=7).value = test_type_labels.get(test_type, test_type)
+                        vis_sheet.cell(row=row, column=8).value = mobile_desktop_data[test_type]['mobile']
+                        vis_sheet.cell(row=row, column=9).value = mobile_desktop_data[test_type]['desktop']
+                        
+                        # Color-code cells based on values
+                        for j, col_idx in enumerate([8, 9]):
+                            device_type = 'mobile' if j == 0 else 'desktop'
+                            count = mobile_desktop_data[test_type][device_type]
+                            cell = vis_sheet.cell(row=row, column=col_idx)
+                            
+                            # Apply coloring based on count
+                            if count > 10:
+                                cell.fill = openpyxl.styles.PatternFill(
+                                    start_color="FF9999", end_color="FF9999", fill_type="solid")
+                                cell.font = openpyxl.styles.Font(bold=True)
+                            elif count > 5:
+                                cell.fill = openpyxl.styles.PatternFill(
+                                    start_color="FFCCCC", end_color="FFCCCC", fill_type="solid")
+                            elif count > 0:
+                                cell.fill = openpyxl.styles.PatternFill(
+                                    start_color="FFF9C4", end_color="FFF9C4", fill_type="solid")
+                    
+                    # Create a bar chart comparing mobile vs desktop issues
+                    compare_chart = openpyxl.chart.BarChart()
+                    compare_chart.type = "col"
+                    compare_chart.title = "Mobile vs Desktop Comparison"
+                    compare_chart.style = 12
+                    compare_chart.x_axis.title = "Issue Type"
+                    compare_chart.y_axis.title = "Number of Issues"
+                    
+                    # Data for the chart
+                    compare_data = openpyxl.chart.Reference(
+                        vis_sheet,
+                        min_col=8,
+                        max_col=9,
+                        min_row=mobile_vs_desktop_row + 1,
+                        max_row=mobile_vs_desktop_row + 1 + len(test_types)
+                    )
+                    
+                    # Categories
+                    compare_cats = openpyxl.chart.Reference(
+                        vis_sheet,
+                        min_col=7,
+                        max_col=7,
+                        min_row=mobile_vs_desktop_row + 2,
+                        max_row=mobile_vs_desktop_row + 1 + len(test_types)
+                    )
+                    
+                    # Add data and configure
+                    compare_chart.add_data(compare_data, titles_from_data=True)
+                    compare_chart.set_categories(compare_cats)
+                    compare_chart.shape = 4  # 4 gives cylinder shape bars
+                    
+                    # Make the chart larger
+                    compare_chart.width = 25
+                    compare_chart.height = 15
+                    
+                    # Add the chart to the sheet
+                    vis_sheet.add_chart(compare_chart, "D40")
+                    
+                    # Add a summary note
+                    compare_note_row = mobile_vs_desktop_row + len(test_types) + 3
+                    vis_sheet.cell(row=compare_note_row, column=7).value = "This comparison helps identify which issues are more prevalent on mobile vs desktop screens."
+                    vis_sheet.cell(row=compare_note_row, column=7).font = openpyxl.styles.Font(italic=True)
+            
             # Apply formatting to all sheets
             for sheet_name in writer.sheets:
                 worksheet = writer.sheets[sheet_name]
@@ -795,12 +1578,182 @@ class AccessibilityReportGenerator:
                         vertical='center',
                         horizontal='center'
                     )
+                    # Add background color to header cells
+                    cell.fill = openpyxl.styles.PatternFill(
+                        start_color="E6E6E6",
+                        end_color="E6E6E6",
+                        fill_type="solid"
+                    )
                 worksheet.row_dimensions[1].height = 40
                 
-                # Format data rows
+                # Add conditional formatting to responsive breakpoint columns in Detailed Results sheet
+                if sheet_name == 'Detailed Results':
+                    # First identify responsive test rows
+                    responsive_test_rows = []
+                    for row_idx, row in enumerate(worksheet.iter_rows(min_row=2), start=2):
+                        if row[0].value and isinstance(row[0].value, str) and row[0].value.startswith('responsive.'):
+                            responsive_test_rows.append(row_idx)
+                    
+                    # Now add conditional formatting to cells in these rows
+                    for row_idx in responsive_test_rows:
+                        for cell in worksheet[row_idx]:
+                            if isinstance(cell.value, str):
+                                # Apply color based on content
+                                if "issue" in cell.value.lower() and "no issues" not in cell.value.lower():
+                                    # Extract issue count if possible
+                                    issue_count = 0
+                                    try:
+                                        if " issue(s)" in cell.value:
+                                            count_text = cell.value.split(" issue(s)")[0]
+                                            issue_count = int(count_text)
+                                    except:
+                                        pass
+                                    
+                                    # Apply severity-based color
+                                    if issue_count > 3 or "high" in cell.value.lower():
+                                        # High severity - light red
+                                        cell.fill = openpyxl.styles.PatternFill(
+                                            start_color="FFCCCC",
+                                            end_color="FFCCCC",
+                                            fill_type="solid"
+                                        )
+                                    elif issue_count > 1 or "medium" in cell.value.lower():
+                                        # Medium severity - light orange
+                                        cell.fill = openpyxl.styles.PatternFill(
+                                            start_color="FFE0B2",
+                                            end_color="FFE0B2",
+                                            fill_type="solid"
+                                        )
+                                    else:
+                                        # Low severity - light yellow
+                                        cell.fill = openpyxl.styles.PatternFill(
+                                            start_color="FFF9C4",
+                                            end_color="FFF9C4",
+                                            fill_type="solid"
+                                        )
+                                elif "no issues" in cell.value.lower():
+                                    # No issues - light green
+                                    cell.fill = openpyxl.styles.PatternFill(
+                                        start_color="E8F5E9",
+                                        end_color="E8F5E9",
+                                        fill_type="solid"
+                                    )
+                
+                # Apply conditional formatting to the Responsive Testing Matrix sheet
+                if sheet_name == 'Responsive Testing Matrix':
+                    # Add column headers highlighting
+                    for row in worksheet.iter_rows(min_row=2):
+                        # Process the status column
+                        status_col_idx = None
+                        for i, cell in enumerate(row):
+                            if i == 0:  # Domain column - add light gray fill
+                                cell.fill = openpyxl.styles.PatternFill(
+                                    start_color="F5F5F5",
+                                    end_color="F5F5F5",
+                                    fill_type="solid"
+                                )
+                            if cell.value == 'Status':
+                                status_col_idx = i
+                                break
+                            
+                            if cell.value == 'Status':
+                                status_col_idx = i
+                            
+                            # Format the Breakpoint column - add subtle fill to identify breakpoint changes
+                            if i == 2 and cell.value and cell.column_letter:  # Breakpoint column
+                                cell.fill = openpyxl.styles.PatternFill(
+                                    start_color="F5F5F5", 
+                                    end_color="F5F5F5",
+                                    fill_type="solid"
+                                )
+                        
+                        # Process status cell if found
+                        if status_col_idx is not None:
+                            status_cell = row[status_col_idx]
+                            if status_cell.value == 'Issues Found':
+                                status_cell.fill = openpyxl.styles.PatternFill(
+                                    start_color="FFCCCC",  # Light red
+                                    end_color="FFCCCC",
+                                    fill_type="solid"
+                                )
+                                status_cell.font = openpyxl.styles.Font(size=16, bold=True)
+                            elif status_cell.value == 'Pass':
+                                status_cell.fill = openpyxl.styles.PatternFill(
+                                    start_color="E8F5E9",  # Light green
+                                    end_color="E8F5E9",
+                                    fill_type="solid"
+                                )
+                
+                # Add conditional formatting to the Responsive Breakpoint Summary sheet
+                if sheet_name == 'Responsive Breakpoint Summary':
+                    for row in worksheet.iter_rows(min_row=2):
+                        # Check for the Total Issues column
+                        total_issues_col = None
+                        for i, cell in enumerate(row):
+                            if i == 0 and cell.value and '  -- ' not in str(cell.value):  # Main URL row
+                                cell.font = openpyxl.styles.Font(size=16, bold=True)
+                                cell.fill = openpyxl.styles.PatternFill(
+                                    start_color="E3F2FD",  # Light blue
+                                    end_color="E3F2FD",
+                                    fill_type="solid"
+                                )
+                            elif i == 0 and cell.value and '  -- ' in str(cell.value):  # Breakpoint subrow
+                                # Extract the breakpoint from the URL @ {bp}px format
+                                try:
+                                    bp_text = cell.value.split('@')[1].strip()
+                                    bp_px = int(bp_text.replace('px', ''))
+                                    
+                                    # Different colors based on breakpoint size
+                                    if bp_px <= 480:  # Mobile
+                                        bg_color = "FFF8E1"  # Light amber for mobile
+                                    elif bp_px <= 768:  # Tablet
+                                        bg_color = "FFECB3"  # Medium amber for tablet
+                                    else:  # Desktop
+                                        bg_color = "FFE0B2"  # Dark amber for desktop
+                                    
+                                    cell.fill = openpyxl.styles.PatternFill(
+                                        start_color=bg_color,
+                                        end_color=bg_color,
+                                        fill_type="solid"
+                                    )
+                                except:
+                                    # Default formatting if parsing fails
+                                    cell.fill = openpyxl.styles.PatternFill(
+                                        start_color="F5F5F5",
+                                        end_color="F5F5F5",
+                                        fill_type="solid"
+                                    )
+                            
+                            # Check for the Total Issues column
+                            header_cell = worksheet.cell(row=1, column=i+1)
+                            if header_cell.value == 'Total Issues':
+                                total_issues_col = i
+                        
+                        # Format the Total Issues column based on value
+                        if total_issues_col is not None and row[total_issues_col].value:
+                            try:
+                                issue_count = int(row[total_issues_col].value)
+                                if issue_count > 5:
+                                    row[total_issues_col].fill = openpyxl.styles.PatternFill(
+                                        start_color="FFCCCC",  # Light red (high)
+                                        end_color="FFCCCC",
+                                        fill_type="solid"
+                                    )
+                                    row[total_issues_col].font = openpyxl.styles.Font(size=16, bold=True)
+                                elif issue_count > 0:
+                                    row[total_issues_col].fill = openpyxl.styles.PatternFill(
+                                        start_color="FFE0B2",  # Light orange (medium)
+                                        end_color="FFE0B2",
+                                        fill_type="solid"
+                                    )
+                            except:
+                                pass
+                
+                # Format data rows (general formatting for all sheets)
                 for row in worksheet.iter_rows(min_row=2):
                     for cell in row:
-                        cell.font = openpyxl.styles.Font(size=16)
+                        if not cell.font.size:  # Only set font if not already set
+                            cell.font = openpyxl.styles.Font(size=16)
                         
                         # Check if content is a table-like structure
                         if isinstance(cell.value, str) and '\n' in cell.value:
